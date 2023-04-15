@@ -34,7 +34,8 @@ public class FeedParser {
     private var data: Data?
     private var url: URL?
     private var xmlStream: InputStream?
-    
+    public var userAgent: String?
+
     /// A FeedParser handler provider.
     var parser: FeedParserProtocol?
    
@@ -65,7 +66,6 @@ public class FeedParser {
     ///
     /// - Returns: The parsed `Result`.
     public func parse() -> Result<Feed, ParserError> {
-        
         if let url = url {
             // The `Data(contentsOf:)` initializer doesn't handle the `feed` URI scheme. As such,
             // it's sanitized first, in case it's in fact a `feed` scheme.
@@ -73,33 +73,67 @@ public class FeedParser {
                 return .failure(.internalError(reason: "Failed url sanitizing."))
             }
 
-            do {
-                data = try Data(contentsOf: sanitizedSchemeUrl)
-            } catch {
-                return .failure(.internalError(reason: error.localizedDescription))
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: Result<Feed, ParserError> = .failure(.internalError(reason: "Unknown error."))
+
+            fetchData(from: sanitizedSchemeUrl) { data, error in
+                if let data = data {
+                    result = self.parseData(data)
+                } else {
+                    result = .failure(.internalError(reason: error?.localizedDescription ?? "Unknown error."))
+                }
+                semaphore.signal()
             }
+
+            semaphore.wait()
+            return result
         }
-        
+
         if let data = data {
-            guard let feedDataType = FeedDataType(data: data) else {
-                return .failure(.feedNotFound)
-            }
-            switch feedDataType {
-            case .json: parser = JSONFeedParser(data: data)
-            case .xml:  parser = XMLFeedParser(data: data)
-            }
-            return parser!.parse()
+            return parseData(data)
         }
-        
+
         if let xmlStream = xmlStream {
             parser = XMLFeedParser(stream: xmlStream)
             return parser!.parse()
         }
-        
+
         return .failure(.internalError(reason: "Fatal error. Unable to parse from the initialized state."))
-        
     }
     
+    /// Fetches data from the specified URL using URLSession with a custom User-Agent.
+    ///
+    /// - Parameters:
+    ///   - url: The URL from which to fetch the data.
+    ///   - completion: The completion handler to call when the request is complete.
+    ///                 This handler is passed the fetched data or an error.
+    private func fetchData(from url: URL, completion: @escaping (Data?, Error?) -> Void) {
+        var request = URLRequest(url: url)
+        if let userAgent = userAgent {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        }
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            completion(data, error)
+        }
+        task.resume()
+    }
+    
+    /// Parses the given data into a `Feed` object and returns a `Result` object.
+    ///
+    /// - Parameter data: The XML or JSON data to parse.
+    /// - Returns: A `Result` object containing either the parsed `Feed` object or a `ParserError`.
+    private func parseData(_ data: Data) -> Result<Feed, ParserError> {
+        guard let feedDataType = FeedDataType(data: data) else {
+            return .failure(.feedNotFound)
+        }
+        switch feedDataType {
+        case .json: parser = JSONFeedParser(data: data)
+        case .xml:  parser = XMLFeedParser(data: data)
+        }
+        return parser!.parse()
+    }
+
     /// Starts parsing the feed asynchronously. Parsing runs by default on the
     /// global queue. You are responsible to manually bring the result closure
     /// to whichever queue is apropriate, if any.
